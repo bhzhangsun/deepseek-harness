@@ -22,6 +22,14 @@ esac
 
 fail() { printf 'smoke-test: %s\n' "$1" >&2; exit 1; }
 
+# curl reports a malformed URL as exit 3 and a refused connection as 7; name the
+# exit instead of letting set -e end the script without a message.
+http_code() {
+  code=$(curl -sS -o /dev/null -w '%{http_code}' "$@") \
+    || fail "curl exited $? for: $*"
+  printf '%s' "$code"
+}
+
 printf 'smoke-test: installing %s\n' "$package"
 apt-get install -y "$package"
 
@@ -47,16 +55,20 @@ done
 $(journalctl -u dsh --no-pager --lines=40 || true)"
 printf 'smoke-test: launch URL %s\n' "$url"
 
-status=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+# `?` is a pattern wildcard inside ${...}, so strip the query with an escaped
+# one; a bare /?* removes from the first slash and leaves "http:".
+base=${url%%\?*}
+
+status=$(http_code "$url")
 [ "$status" = 303 ] || fail "the token exchange returned $status, expected 303"
 
-cookie=$(curl -s -D - -o /dev/null "$url" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | tail -1)
+cookie=$(curl -sS -D - -o /dev/null "$url" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | tail -1)
 [ -n "$cookie" ] || fail 'the token exchange set no cookie'
-status=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: $cookie" "${url%%/?*}/")
+status=$(http_code -H "Cookie: $cookie" "$base")
 [ "$status" = 200 ] || fail "the authenticated page returned $status, expected 200"
 
 port=$(printf '%s' "$url" | sed -n 's|http://127\.0\.0\.1:\([0-9]*\)/.*|\1|p')
-status=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+status=$(http_code -X POST \
   -H "Host: localhost:${port}" -H 'content-type: application/json' \
   --data '{"type":"client-request","rpcId":"smoke","method":"settings/describe","payload":{"args":{}}}' \
   "http://127.0.0.1:${port}/api/settings/describe")
