@@ -31,6 +31,11 @@ state=${state%\'}; state=${state#\'}
 entry=/usr/bin/dsh
 search=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# The caller's XDG directories point into their own home, which the service
+# account cannot open, and a system service has none of them: dropping them keeps
+# pnpm's configuration, cache, and state under the service account's own home.
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
+
 if [ "$(id -u)" = 0 ]; then
   exec setpriv --reuid="$account" --regid="$(id -gn "$account")" --init-groups \
     env HOME="$home" DSH_HOME="$state" PATH="$search" "$entry" "$@"
