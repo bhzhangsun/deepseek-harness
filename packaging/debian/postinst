@@ -1,0 +1,33 @@
+#!/bin/sh
+# Create the service account and state directory, then enable the unit.
+set -e
+
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-remove ] || [ "$1" = abort-deconfigure ]; then
+  if ! getent group dsh >/dev/null; then
+    addgroup --system dsh
+  fi
+  if ! getent passwd dsh >/dev/null; then
+    adduser --system --ingroup dsh --home /var/lib/dsh --no-create-home \
+      --shell /usr/sbin/nologin --disabled-password dsh
+  fi
+
+  # install creates the directory with the service account as owner, and leaves
+  # an existing directory untouched, so an upgrade keeps the session data.
+  install -d -o dsh -g dsh -m 0700 /var/lib/dsh
+  install -d -o dsh -g dsh -m 0755 /var/lib/dsh/workspace
+
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    deb-systemd-helper unmask dsh.service >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled dsh.service; then
+      deb-systemd-helper enable dsh.service >/dev/null || true
+    else
+      deb-systemd-helper update-state dsh.service >/dev/null || true
+    fi
+    # Restart on upgrade so the replaced runtime takes effect; on a fresh
+    # install nothing is running yet and the invoke starts the unit.
+    deb-systemd-invoke restart dsh.service >/dev/null || true
+  fi
+fi
+
+exit 0

@@ -1,0 +1,16 @@
+# Configuration for the dsh systemd service.
+# Run `systemctl restart dsh` after an edit.
+
+# Loopback port the Web UI listens on.
+DSH_WEB_PORT=3080
+
+# State directory holding sessions, settings, and the browser credential file.
+# The service runs with ProtectSystem=full, so a directory outside /var/lib/dsh
+# also needs adding to ReadWritePaths in /lib/systemd/system/dsh.service.
+#DSH_HOME=/var/lib/dsh
+
+# The model provider key the harness sends requests with.
+#DEEPSEEK_API_KEY=
+
+# Disable anonymous usage telemetry (already set by default in the unit).
+#DSH_TELEMETRY_DISABLED=1

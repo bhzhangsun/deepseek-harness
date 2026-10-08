@@ -1,0 +1,12 @@
+#!/bin/sh
+# Debian launcher for the DeepSeek Harness CLI.
+# The application tree is installed outside the default module path, so every
+# invocation runs the pinned runtime against the published entry point.
+set -e
+
+entry=/opt/dsh/app/node_modules/@deepseek-ai/dsh/lib/bin.js
+if [ ! -e "$entry" ]; then
+  entry=/opt/dsh/app/node_modules/.bin/dsh
+fi
+
+exec /opt/dsh/node/bin/node "$entry" "$@"

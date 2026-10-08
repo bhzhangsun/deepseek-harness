@@ -1,0 +1,11 @@
+#!/bin/sh
+# Stop the service before its files disappear.
+set -e
+
+if [ "$1" = remove ] || [ "$1" = deconfigure ] || [ "$1" = upgrade ]; then
+  if [ -d /run/systemd/system ]; then
+    deb-systemd-invoke stop dsh.service >/dev/null || true
+  fi
+fi
+
+exit 0

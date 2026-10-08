@@ -1,0 +1,81 @@
+# Build the Debian system-service package for the published @deepseek-ai/dsh
+# release, then install it on a real systemd host and serve the Web UI.
+#
+# This workflow belongs to the packaging branch of a fork. It never publishes a
+# release: it uploads the .deb as a build artifact and deletes nothing outside
+# the runner.
+name: Debian package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '@deepseek-ai/dsh version to package; empty uses apps/cli/package.json'
+        required: false
+        type: string
+  push:
+    branches-ignore:
+      - master
+    paths:
+      - 'packaging/**'
+      - '.github/workflows/deb.yml'
+    tags:
+      - 'dsh-deb-v*'
+
+permissions:
+  contents: read
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Each architecture builds on a host of that architecture so npm
+          # resolves that architecture's optional native packages.
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--arch '${{ matrix.arch }}' --out dist-deb)
+          if [ -n "${VERSION:-}" ]; then
+            args+=(--version "$VERSION")
+          fi
+          packaging/debian/build-deb.sh "${args[@]}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dsh-deb-${{ matrix.arch }}
+          path: dist-deb/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: install and serve
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dsh-deb-amd64
+          path: dist-deb
+
+      - name: Smoke-test the package
+        run: |
+          set -euo pipefail
+          sudo packaging/debian/smoke-test.sh "$(ls dist-deb/*.deb)"

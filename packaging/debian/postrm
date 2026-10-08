@@ -1,0 +1,20 @@
+#!/bin/sh
+# Disable the unit on removal and drop its state on purge.
+set -e
+
+if [ "$1" = remove ]; then
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  deb-systemd-helper disable dsh.service >/dev/null || true
+fi
+
+if [ "$1" = purge ]; then
+  deb-systemd-helper purge dsh.service >/dev/null || true
+  deb-systemd-helper unmask dsh.service >/dev/null || true
+  # Sessions, settings, and credentials live here; the service account stays,
+  # so `deluser dsh` finishes a manual cleanup.
+  rm -rf /var/lib/dsh
+fi
+
+exit 0

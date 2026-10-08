@@ -1,0 +1,39 @@
+[Unit]
+Description=DeepSeek Harness Web UI
+Documentation=https://deepseek-harness.github.io/deepseek-harness/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsh
+Group=dsh
+WorkingDirectory=/var/lib/dsh/workspace
+
+# DSH_HOME holds sessions, settings, and the browser credential file. The
+# environment file is read last, so it can override this value; relocating
+# DSH_HOME also requires extending ReadWritePaths below.
+Environment=HOME=/var/lib/dsh
+Environment=DSH_HOME=/var/lib/dsh
+Environment=DSH_TELEMETRY_DISABLED=1
+Environment=DSH_WEB_PORT=3080
+EnvironmentFile=-/etc/default/dsh
+
+# `web` serves the Web UI and prints the token URL it is reachable at. It binds
+# 127.0.0.1 only: reach a remote host through `ssh -L 3080:127.0.0.1:3080`.
+ExecStart=/usr/bin/dsh web --no-open --port ${DSH_WEB_PORT}
+
+Restart=on-failure
+RestartSec=5
+StateDirectory=dsh
+StateDirectoryMode=0700
+LogsDirectory=dsh
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/dsh
+
+[Install]
+WantedBy=multi-user.target
