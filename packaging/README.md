@@ -74,6 +74,18 @@ DSH_WEB_ARGS=--public-url=https://nas.example.ts.net/ --trusted-host=nas.example
 
 A private HTTPS endpoint (Tailscale Serve) or a public one (a `cloudflared` tunnel) provides that external leg without proxy configuration of your own. Terminate TLS there: an `http://` root sends the launch token and the session cookie unencrypted, and the printed URL carries a process credential, so share it only with intended users.
 
+### A login gate instead of a shared token
+
+A tunnel or proxy authenticates nobody: the launch token is a process credential, and anyone who reads it can run commands. The third-party [`@xgone/dsh-remote`](https://github.com/xgone/dsh-remote) plugin (MIT) puts a login gate with TOTP in front of every path, and rewrites an authenticated request's `Host` to the loopback authority so the request fence admits its `/api` and WebSocket calls. That removes the need for `--trusted-host` and for proxy configuration of your own; a tunnel to the loopback port is still required, because the service binds `127.0.0.1`.
+
+```sh
+sudo -u dsh env HOME=/var/lib/dsh DSH_HOME=/var/lib/dsh \
+  /usr/bin/dsh plugin --profile web add @xgone/dsh-remote
+sudo systemctl restart dsh
+```
+
+The first administrator can be created only from loopback: reach the port over `ssh -L` and create the account in the browser, or set `bootstrap` in `/var/lib/dsh/profiles/web/cordis.patch.yml` for a host without a browser, then remove the plaintext password after the first login. Set `session.secure: true` once the tunnel serves HTTPS. The plugin is third-party and tracks DSH releases, so check its changelog before upgrading the package.
+
 The unit sets `DSH_HOME=/var/lib/dsh` and `HOME=/var/lib/dsh`, denies new privileges, gives the service a private `/tmp`, and mounts the system read-only. `ProtectHome=read-only` blocks `/home`, so a harness that must edit files there needs that directive relaxed. Relocating `DSH_HOME` in `/etc/default/dsh` also requires adding the new path to `ReadWritePaths`.
 
 Set the model provider key in `/etc/default/dsh` (`DEEPSEEK_API_KEY=...`, then `chmod 600 /etc/default/dsh`), or store it through the Web UI, which keeps it in the credentials file under `DSH_HOME` instead. Commands the agent runs are confined by the process sandbox, which on Linux needs `bubblewrap` or a Landlock-enforcing kernel; without either, confined commands fail closed. The package recommends `bubblewrap`.
