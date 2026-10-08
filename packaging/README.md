@@ -78,11 +78,23 @@ A private HTTPS endpoint (Tailscale Serve) or a public one (a `cloudflared` tunn
 
 A tunnel or proxy authenticates nobody: the launch token is a process credential, and anyone who reads it can run commands. The third-party [`@xgone/dsh-remote`](https://github.com/xgone/dsh-remote) plugin (MIT) puts a login gate with TOTP in front of every path, and rewrites an authenticated request's `Host` to the loopback authority so the request fence admits its `/api` and WebSocket calls. That removes the need for `--trusted-host` and for proxy configuration of your own; a tunnel to the loopback port is still required, because the service binds `127.0.0.1`.
 
+The package carries the pinned Node runtime and the published application closure. `dsh plugin` forwards its arguments to `pnpm`, which it resolves through `PATH` and which the package does not carry, so install pnpm once with the bundled npm before managing plugins:
+
 ```sh
-sudo -u dsh env HOME=/var/lib/dsh DSH_HOME=/var/lib/dsh \
-  /usr/bin/dsh plugin --profile web add @xgone/dsh-remote
-sudo systemctl restart dsh
+sudo /opt/dsh/node/bin/npm install -g pnpm@11.7.0   # the version package.json pins
+sudo ln -sf /opt/dsh/node/bin/pnpm /usr/local/bin/pnpm
 ```
+
+Then, as the service account, with the service stopped so the profile is not rewritten while it boots:
+
+```sh
+sudo systemctl stop dsh
+sudo -u dsh env HOME=/var/lib/dsh DSH_HOME=/var/lib/dsh PATH=/usr/local/bin:/usr/bin:/bin \
+  /usr/bin/dsh plugin --profile web add @xgone/dsh-remote
+sudo systemctl start dsh
+```
+
+Installing as root instead leaves `$DSH_HOME/auth/store.json` owned by root, and the service account then cannot create the first account.
 
 The first administrator can be created only from loopback: reach the port over `ssh -L` and create the account in the browser, or set `bootstrap` in `/var/lib/dsh/profiles/web/cordis.patch.yml` for a host without a browser, then remove the plaintext password after the first login. Set `session.secure: true` once the tunnel serves HTTPS. The plugin is third-party and tracks DSH releases, so check its changelog before upgrading the package.
 
