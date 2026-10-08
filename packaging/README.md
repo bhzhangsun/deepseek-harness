@@ -9,7 +9,7 @@ This directory builds a Debian package that installs DeepSeek Harness as a syste
 | `/opt/dsh/node` | The Node.js runtime pinned by [`scripts/primary-runtime/lock.json`](../scripts/primary-runtime/lock.json) |
 | `/opt/dsh/app` | `@deepseek-ai/dsh@<version>` and its dependency closure, installed from the npm registry |
 | `/usr/bin/dsh` | Launcher that runs the bundled runtime against the installed entry point |
-| `/usr/bin/dsh-cli` | Runs that launcher, under `sudo`, as the service account and against the service state, for plugin and profile commands |
+| `/usr/bin/dsh-cli` | Runs that launcher, under `sudo`, as the service account and against the service state, for plugin and profile commands; its `user` subcommand creates a per-account home the service account can reach |
 | `/lib/systemd/system/dsh.service` | The service unit |
 | `/etc/default/dsh` | Configuration file the unit reads (a `conffile`, so an upgrade keeps your edits) |
 | `/var/lib/dsh` | State: sessions, settings, and the browser credential file, owned by the `dsh` service account |
@@ -48,6 +48,29 @@ journalctl -u dsh | grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[^ ]*' | tail -1
 ```
 
 Open that URL once to exchange the token for the browser cookie; the credential persists in `/var/lib/dsh/.credentials.yaml` (mode `0600`), so later restarts do not need a new token.
+
+### A directory another account owns
+
+The service account opens a directory as its own uid, so a directory owned by someone else needs a grant on it. `dsh-cli user` supplies the three parts of one: the directory, an entry point under the service account's home, and the ACL.
+
+```sh
+sudo dsh-cli user add alice                     # create the account and its home
+sudo dsh-cli user add bhzhangsun --base /home   # adopt a login account that exists
+sudo dsh-cli user list
+sudo dsh-cli user revoke bhzhangsun             # drop the grant, keep the account
+sudo dsh-cli user remove alice --purge          # delete an account it created
+```
+
+The default home is `<DSH_HOME>/users/<name>`, mode `0750` and owned by that account, linked at `<DSH_HOME>/<name>` as the path the agent reads as `~/<name>`. Pointing `--base` at an existing home's parent adopts that home instead: the account and the directory stay as they are, with neither owner nor mode changed, and only the grant is applied.
+
+| `--share` | Grant | Takes effect |
+|---|---|---|
+| `acl` (default) | `u:dsh:rwX` as a named ACL on the home, plus the same as a default ACL so files the account creates later stay reachable | at the next open: no restart |
+| `group` | the service account joins `<name>`'s private group, the home gains the setgid bit, and a default group ACL carries the write bit to new files | after `sudo systemctl restart dsh`: a running unit keeps the supplementary groups it started with |
+
+The base directory is root-owned, so the service account may write inside each home but cannot remove or replace one. `add` then reports what that account can actually do, opening the home as the service account's own uid, so a grant that quietly failed does not read back as success. `--read-only` grants `rX` instead of `rwX`, and `--dry-run` prints the exact command sequence without running it.
+
+Two things stay outside this command. The unit mounts `/home` read-only (`ProtectHome=read-only`, see below), so a home there needs one unit exception before writes work; the check above is what reports it, and `add` names the exception. And the agent's own sandbox reaches only the directories registered as workspaces, so add that home as a workspace in the Web UI too. `revoke` drops the link, the ACL entries and the group membership while keeping the account and every file; `remove` deletes an account only when its home is inside the default base, and otherwise names `revoke` and `--force` instead of deleting a login account.
 
 ## Reach the Web UI from another device
 
@@ -132,3 +155,4 @@ deluser dsh             # the service account survives a purge
 - The Node.js version follows `scripts/primary-runtime/lock.json`, so raising it is a change to that file rather than to this packaging.
 - The payload is the published npm release. A version that is not on the registry fails the build instead of producing a package that cannot start.
 - The unit runs the Web UI only. Headless and SDK profiles are reachable through `/usr/bin/dsh` with the same runtime.
+- `dsh-cli user` creates real accounts outside the package's own footprint, so `apt-get purge` leaves them and their homes behind; remove them with `dsh-cli user remove --purge` first if the host must not keep them.

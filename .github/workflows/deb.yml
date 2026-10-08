@@ -45,6 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The subcommand is stubbed-tested without root, so it fails fast before
+      # the two registry round trips the package build needs.
+      - name: Test the dsh-cli user subcommand
+        run: packaging/debian/dsh-cli.test.sh
+
       - name: Build the package
         env:
           VERSION: ${{ inputs.version }}

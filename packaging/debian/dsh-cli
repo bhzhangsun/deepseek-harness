@@ -3,6 +3,13 @@
 # unit, so plugin and profile commands change what the service loads. Running
 # /usr/bin/dsh directly uses the caller's $HOME/.dsh instead, a tree the service
 # never reads. The account switch needs root, so invoke this with sudo.
+#
+# `user` is answered here instead of being handed to dsh. The service account
+# opens a directory as its own uid, so a directory owned by another account needs
+# a POSIX grant on it, and creating that owning account is a root operation that
+# does not belong inside a long-running service. A home that already exists, such
+# as a login account's, needs no account creation at all: pointing --base at its
+# parent adopts it and applies the same grant. See `dsh-cli user help`.
 set -e
 
 unit=dsh.service
@@ -27,7 +34,9 @@ state=${state%\'}; state=${state#\'}
 [ -n "$state" ] || state=$home
 
 # PATH decides which pnpm an install uses, and the service account has no login
-# environment of its own, so name the search path explicitly.
+# environment of its own, so name the search path explicitly. It also carries
+# /usr/sbin, where adduser, useradd and setfacl live: the caller's own PATH
+# usually does not, which is why `command -v useradd` fails for a plain user.
 entry=/usr/bin/dsh
 search=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -35,6 +44,545 @@ search=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # account cannot open, and a system service has none of them: dropping them keeps
 # pnpm's configuration, cache, and state under the service account's own home.
 unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
+
+# ---------------------------------------------------------------------------
+# user — a per-account home the service account can reach
+# ---------------------------------------------------------------------------
+
+# The default base sits inside the service state, where the service account
+# already owns the ground it walks on. A base elsewhere works too, as long as the
+# new account can traverse its way in; that is what user_traverse grants. Pointing
+# the base at an existing home's parent adopts that home instead of creating one.
+user_base_default() {
+  printf '%s/users\n' "$state"
+}
+
+user_usage() {
+  cat <<'EOF'
+dsh-cli user — a directory the service account can read and write
+
+  dsh-cli user add <name> [options]      home, link and grant; adopts what exists
+  dsh-cli user list [--base <dir>]       list the accounts granted access
+  dsh-cli user revoke <name>             drop the grant, keep the account and files
+  dsh-cli user remove <name> [options]   delete an account this command created
+  dsh-cli user help
+
+The service account opens a directory as its own uid, so a directory owned by
+another account needs a grant. `add` supplies the three parts of one:
+
+  home   <state>/users/<name>   owned by <name>, mode 0750 (2770 with group share)
+  link   <home>/<name>          the entry point the agent reads as ~/<name>
+  grant  acl   (default) named ACL on the home plus a default ACL, so files the
+               account creates later stay reachable. It applies to the next open
+               and changes no process identity, so nothing needs a restart.
+         group the service account joins <name>'s private group and the home
+               gains the setgid bit. A running unit keeps the supplementary
+               groups it started with, so restart it to pick the group up:
+               sudo systemctl restart dsh
+         both  both grants.     none  no grant: only the account and directory.
+
+It creates the account only when the name is free. A home that already exists,
+such as a login account under /home, is reached by pointing --base at its parent:
+`add` then adopts the account and the directory as they are, re-applies the
+grant, and changes neither the owner nor the mode. The unit mounts /home
+read-only (ProtectHome=read-only), so a write grant there also needs one unit
+exception, which `add` names when the check below fails.
+
+  exit   0 granted and verified. 1 refused or failed. 2 usage.
+
+add options:
+  --base <dir>      home base, default <state>/users; the home is <base>/<name>
+  --share <mode>    acl | group | both | none, default acl
+  --read-only       grant read and traverse only (acl mode: rX, not rwX)
+  --shell <shell>   login shell for a created account, default /usr/sbin/nologin
+  --dry-run         print the commands instead of running them
+
+revoke options:
+  --base <dir>      base to resolve <name> against, default <state>/users
+  --dry-run         print the commands instead of running them
+
+remove options:
+  --base <dir>      base to resolve <name> against, default <state>/users
+  --purge           delete the home directory too, not just the account
+  --force           delete an account whose home is outside the default base
+  --dry-run         print the commands instead of running them
+EOF
+}
+
+user_require_root() {
+  if [ "$(id -u)" = 0 ]; then
+    return 0
+  fi
+  printf 'dsh-cli: run this through sudo, as in: sudo dsh-cli %s\n' "$*" >&2
+  exit 1
+}
+
+# One sink for every mutating step, so --dry-run prints exactly the sequence a
+# real run executes.
+user_dry=0
+user_run() {
+  if [ "$user_dry" = 1 ]; then
+    printf '  + %s\n' "$*"
+  else
+    "$@"
+  fi
+}
+
+# Walk the ancestors of a home: grant traverse on the way in, drop it on the way
+# out. Only x, never r, so the state root stays closed to every other account.
+# GNU stat spells the mode as octal, which is what this Debian-only script gets.
+user_traverse() {
+  dir=$(dirname "$1")
+  while [ -n "$dir" ]; do
+    if [ -d "$dir" ]; then
+      if [ "$3" = grant ]; then
+        case "$(stat -c %a "$dir" 2>/dev/null)" in
+          *[1357]) ;;
+          *) user_run setfacl -m "u:$2:x" "$dir" ;;
+        esac
+      else
+        user_run setfacl -x "u:$2" "$dir" 2>/dev/null || true
+      fi
+    fi
+    if [ "$dir" = / ]; then
+      break
+    fi
+    dir=$(dirname "$dir")
+  done
+}
+
+user_in_group() {
+  id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"
+}
+
+# ReadWritePaths decides what the service may write at all, and ProtectHome=read-only
+# makes /home a read-only mount that no ACL can override, so a write grant landing
+# outside those paths needs a unit exception. This states the diagnosis and leaves
+# the decision to an operator: a wrapper that silently rewrites the unit's hardening
+# would hide the trade-off it is asking for.
+user_unit_hint() {
+  user_unit=$(systemctl show -p ProtectHome -p ReadWritePaths dsh.service 2>/dev/null || true)
+  case "$user_unit" in
+    *ProtectHome=read-only*|*ProtectHome=yes*|*ProtectHome=tmpfs*) ;;
+    *) return 1 ;;
+  esac
+  for user_rw in $(printf '%s\n' "$user_unit" | sed -n 's/^ReadWritePaths=//p'); do
+    case "$1" in
+      "$user_rw"|"$user_rw"/*) return 1 ;;
+    esac
+  done
+  printf 'dsh-cli: the unit protects that path and grants writes elsewhere:\n' >&2
+  printf '  %s\n' "$(printf '%s' "$user_unit" | tr '\n' ' ')" >&2
+  printf 'dsh-cli: add the exception, restart, and re-run this command:\n' >&2
+  printf '  sudo systemctl edit dsh     # in the editor:  [Service]\\nReadWritePaths=%s\n' "$1" >&2
+  printf '  sudo systemctl restart dsh\n' >&2
+  return 0
+}
+
+user_add() {
+  user_name= user_base= user_share=acl user_readonly=0
+  user_shell=/usr/sbin/nologin user_dry=0 user_created=1
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) user_base=${2-}; shift 2 ;;
+      --share) user_share=${2-}; shift 2 ;;
+      --read-only) user_readonly=1; shift ;;
+      --shell) user_shell=${2-}; shift 2 ;;
+      --dry-run) user_dry=1; shift ;;
+      -h|--help) user_usage; exit 0 ;;
+      -*) printf 'dsh-cli: user add: unknown option: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [ -n "$user_name" ]; then
+          printf 'dsh-cli: user add: one name at a time\n' >&2
+          exit 2
+        fi
+        user_name=$1; shift ;;
+    esac
+  done
+
+  if [ -z "$user_name" ]; then
+    printf 'dsh-cli: user add needs a name\n' >&2
+    user_usage >&2
+    exit 2
+  fi
+  # adduser and useradd accept far less than a path, so keep names to the portable
+  # login shape and a name can never be read as a path component.
+  case "$user_name" in
+    [!a-z_]*|*[!a-z0-9_-]*)
+      printf 'dsh-cli: user add: invalid name: %s\n' "$user_name" >&2
+      exit 2 ;;
+  esac
+  if [ "${#user_name}" -gt 32 ]; then
+    printf 'dsh-cli: user add: name longer than 32 characters\n' >&2
+    exit 2
+  fi
+  case "$user_share" in
+    acl|group|both|none) ;;
+    *) printf 'dsh-cli: user add: --share takes acl, group, both or none, not %s\n' "$user_share" >&2
+       exit 2 ;;
+  esac
+  if [ -z "$user_base" ]; then
+    user_base=$(user_base_default)
+  fi
+  case "$user_base" in
+    /*) ;;
+    *) printf 'dsh-cli: user add: --base needs an absolute path, not %s\n' "$user_base" >&2
+       exit 2 ;;
+  esac
+  user_base=${user_base%/}
+  user_home="$user_base/$user_name"
+  user_link="$home/$user_name"
+  if [ "$user_home" = "$user_link" ]; then
+    printf 'dsh-cli: user add: home and link would be the same path (%s); pick another --base\n' \
+      "$user_home" >&2
+    exit 2
+  fi
+
+  # An account this wrapper did not create is not ours to rewrite: a grant belongs
+  # on a home we placed, so refuse instead of reaching into someone else's.
+  if getent passwd "$user_name" >/dev/null 2>&1; then
+    user_existing=$(getent passwd "$user_name" | cut -d: -f6)
+    if [ "$user_existing" != "$user_home" ]; then
+      printf 'dsh-cli: account %s already exists with home %s; refusing\n' \
+        "$user_name" "$user_existing" >&2
+      exit 1
+    fi
+    printf 'dsh-cli: account %s exists; re-applying its grant\n' "$user_name" >&2
+    user_created=0
+  fi
+
+  if [ -e "$user_link" ] && [ ! -L "$user_link" ]; then
+    printf 'dsh-cli: %s exists and is not a symlink; move it aside first\n' "$user_link" >&2
+    exit 1
+  fi
+
+  printf 'dsh-cli: user add %s\n' "$user_name"
+  if [ ! -d "$user_base" ]; then
+    user_run install -d -m 0755 "$user_base"
+    # The base belongs to root, not to the service account. Whoever owns a
+    # directory may remove its entries, so root ownership keeps one bad command
+    # inside the service from displacing every per-user home at once.
+    user_run chown root:root "$user_base"
+  fi
+
+  if [ "$user_created" = 1 ]; then
+    if command -v adduser >/dev/null 2>&1; then
+      user_run adduser --quiet --disabled-password --gecos '' \
+        --home "$user_home" --shell "$user_shell" "$user_name"
+    else
+      user_run useradd --create-home --home-dir "$user_home" \
+        --shell "$user_shell" --user-group "$user_name"
+    fi
+    user_run chown "$user_name:$user_name" "$user_home"
+
+    # Group sharing needs the group write bit on the home itself; the ACL path needs
+    # nothing beyond the owner, because the grant is a named entry.
+    if [ "$user_share" = group ] || [ "$user_share" = both ]; then
+      user_mode=2770
+    else
+      user_mode=0750
+    fi
+    user_run chmod "$user_mode" "$user_home"
+  else
+    # An account that already owns exactly this home keeps its owner and mode: a
+    # wider mode on someone else's directory is a change this command does not get
+    # to make on their behalf, and the grant below does not need it.
+    user_mode=$(stat -c %a "$user_home")
+    printf 'dsh-cli: kept the existing home mode %s\n' "$user_mode"
+    if [ "$user_share" = group ] || [ "$user_share" = both ]; then
+      printf 'dsh-cli: a group grant needs the group bits on that home: chmod g+rwx %s\n' "$user_home"
+    fi
+  fi
+  user_run ln -sfn "$user_home" "$user_link"
+
+  # The account has to open its own home, and that home may sit under a state root
+  # that is 0700 for the service account alone.
+  user_traverse "$user_home" "$user_name" grant
+
+  user_perm=rw
+  if [ "$user_readonly" = 1 ]; then
+    user_perm=r
+  fi
+  if [ "$user_share" = acl ] || [ "$user_share" = both ]; then
+    user_run setfacl -R -m "u:$account:${user_perm}X" "$user_home"
+    user_run setfacl -R -d -m "u:$account:${user_perm}X" "$user_home"
+  fi
+  if [ "$user_share" = group ] || [ "$user_share" = both ]; then
+    user_run usermod -aG "$user_name" "$account"
+    # A default group ACL carries the write bit to files the account creates later;
+    # the group bits alone would leave them readable only, because the umask that
+    # creates them does not know this directory is shared.
+    user_run setfacl -R -d -m "g:$user_name:rwX" "$user_home"
+  fi
+
+  # The check runs as the account itself, so a grant that quietly failed cannot
+  # read back as success.
+  if [ "$user_dry" = 0 ]; then
+    if setpriv --reuid="$account" --regid="$(id -gn "$account")" --init-groups \
+      test -r "$user_home" 2>/dev/null; then
+      printf 'dsh-cli: %s can read  %s\n' "$account" "$user_home"
+    else
+      printf 'dsh-cli: %s CANNOT read %s yet\n' "$account" "$user_home" >&2
+    fi
+    if [ "$user_readonly" = 0 ]; then
+      if setpriv --reuid="$account" --regid="$(id -gn "$account")" --init-groups \
+        test -w "$user_home" 2>/dev/null; then
+        printf 'dsh-cli: %s can write %s\n' "$account" "$user_home"
+      else
+        printf 'dsh-cli: %s CANNOT write %s yet\n' "$account" "$user_home" >&2
+        user_unit_hint "$user_home" >&2 || true
+      fi
+    fi
+  fi
+  if [ "$user_readonly" = 1 ]; then
+    printf 'dsh-cli: --read-only: the grant is rX, so writes stay denied\n'
+  fi
+
+  printf 'dsh-cli: home  %s (owner %s, mode %s)\n' "$user_home" "$user_name" "$user_mode"
+  printf 'dsh-cli: link  %s -> %s\n' "$user_link" "$user_home"
+  case "$user_share" in
+    acl) printf 'dsh-cli: grant %s a named ACL (%sX plus the inherited default)\n' \
+           "$account" "$user_perm" ;;
+    group) printf 'dsh-cli: grant %s group %s (setgid 2770 plus a default group ACL)\n' \
+             "$account" "$user_name" ;;
+    both) printf 'dsh-cli: grant %s both the named ACL and group %s\n' "$account" "$user_name" ;;
+    none) printf 'dsh-cli: --share none: no grant was made, %s cannot open it yet\n' "$account" ;;
+  esac
+  if [ "$user_share" = acl ] || [ "$user_share" = both ]; then
+    printf 'dsh-cli: an ACL is read at the next open, so no restart needed\n'
+  fi
+  if [ "$user_share" = group ] || [ "$user_share" = both ]; then
+    printf 'dsh-cli: a running unit keeps its old groups, so apply the membership:\n'
+    printf '  sudo systemctl restart dsh\n'
+  fi
+  printf 'dsh-cli: add %s as a workspace in the Web UI to let the agent work there\n' "$user_home"
+}
+
+user_list() {
+  user_base=
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) user_base=${2-}; shift 2 ;;
+      -h|--help) user_usage; exit 0 ;;
+      *) printf 'dsh-cli: user list: unknown option: %s\n' "$1" >&2; exit 2 ;;
+    esac
+  done
+  if [ -z "$user_base" ]; then
+    user_base=$(user_base_default)
+  fi
+  user_base=${user_base%/}
+
+  printf '%-16s %-34s %-10s %s\n' ACCOUNT HOME GRANT LINK
+  user_found=0
+  while IFS=: read -r user_n user_pw user_uid user_gid user_gecos user_h user_sh; do
+    # Granted here means the home sits under the base, or the account is linked from
+    # the service account's home, which is how an adopted account outside the state
+    # is listed alongside the created ones.
+    case "$user_h" in
+      "$user_base"/*) ;;
+      *) [ -L "$home/$user_n" ] || continue ;;
+    esac
+    user_found=1
+    user_grant=none
+    if getfacl -p "$user_h" 2>/dev/null | grep -q "^user:$account:"; then
+      user_grant=acl
+    fi
+    if user_in_group "$account" "$user_n"; then
+      if [ "$user_grant" = acl ]; then
+        user_grant=acl+group
+      else
+        user_grant=group
+      fi
+    fi
+    user_link=-
+    if [ -L "$home/$user_n" ]; then
+      user_link=$(readlink "$home/$user_n")
+    fi
+    printf '%-16s %-34s %-10s %s\n' "$user_n" "$user_h" "$user_grant" "$user_link"
+    # A here-doc, not a pipe: entries come from getent so NSS answers too, and the
+    # loop stays in this shell so user_found survives to report an empty base.
+  done <<EOF
+$(getent passwd)
+EOF
+  if [ "$user_found" = 0 ]; then
+    printf '(no account is granted access under %s)\n' "$user_base"
+  fi
+}
+
+user_remove() {
+  user_name= user_base= user_purge=0 user_dry=0 user_force=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) user_base=${2-}; shift 2 ;;
+      --purge) user_purge=1; shift ;;
+      --force) user_force=1; shift ;;
+      --dry-run) user_dry=1; shift ;;
+      -h|--help) user_usage; exit 0 ;;
+      -*) printf 'dsh-cli: user remove: unknown option: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [ -n "$user_name" ]; then
+          printf 'dsh-cli: user remove: one name at a time\n' >&2
+          exit 2
+        fi
+        user_name=$1; shift ;;
+    esac
+  done
+
+  if [ -z "$user_name" ]; then
+    printf 'dsh-cli: user remove needs a name\n' >&2
+    user_usage >&2
+    exit 2
+  fi
+  if [ -z "$user_base" ]; then
+    user_base=$(user_base_default)
+  fi
+  user_base=${user_base%/}
+  user_home="$user_base/$user_name"
+  user_link="$home/$user_name"
+
+  user_entry=$(getent passwd "$user_name" || true)
+  if [ -z "$user_entry" ]; then
+    printf 'dsh-cli: no account named %s\n' "$user_name" >&2
+    exit 1
+  fi
+  user_existing=$(printf '%s\n' "$user_entry" | cut -d: -f6)
+  # A wrong --base must never become a wrong --purge: resolve the home from the
+  # passwd entry and delete only a path this wrapper could have created.
+  if [ "$user_existing" != "$user_home" ]; then
+    printf 'dsh-cli: %s has home %s, not %s; pass the matching --base\n' \
+      "$user_name" "$user_existing" "$user_home" >&2
+    exit 1
+  fi
+  # An account whose home sits outside the default base was not created here, so
+  # deleting it is not a directory operation but the deletion of a login account.
+  # `revoke` drops the grant, which is what adopting such an account needs undone.
+  case "$user_home" in
+    "$(user_base_default)"/*) ;;
+    *)
+      if [ "$user_force" = 0 ]; then
+        printf 'dsh-cli: %s has home %s, outside %s; this command only deletes the accounts it created.\n' \
+          "$user_name" "$user_home" "$(user_base_default)" >&2
+        printf 'dsh-cli: drop just the grant, or pass --force to delete the account too:\n' >&2
+        printf '  sudo dsh-cli user revoke %s\n' "$user_name" >&2
+        printf '  sudo dsh-cli user remove %s --force\n' "$user_name" >&2
+        exit 1
+      fi ;;
+  esac
+
+  if [ "$user_purge" = 1 ]; then
+    printf 'dsh-cli: user remove %s --purge\n' "$user_name"
+  else
+    printf 'dsh-cli: user remove %s\n' "$user_name"
+  fi
+  if command -v deluser >/dev/null 2>&1; then
+    user_run deluser "$user_name"
+  else
+    user_run userdel "$user_name"
+  fi
+  if [ -L "$user_link" ]; then
+    user_run rm -f "$user_link"
+  fi
+  user_run gpasswd -d "$account" "$user_name" 2>/dev/null || true
+  user_traverse "$user_home" "$user_name" revoke
+  if [ "$user_purge" = 1 ]; then
+    if [ -d "$user_home" ]; then
+      user_run rm -rf "$user_home"
+    fi
+  elif [ -d "$user_home" ]; then
+    printf 'dsh-cli: home kept at %s; --purge deletes it\n' "$user_home"
+  fi
+  printf 'dsh-cli: removed %s\n' "$user_name"
+}
+
+# The inverse of a grant, for a home this command did not create: the link, the ACL
+# entries and the group membership go, while the account and every file stay. That
+# is the pair to `add --base`, which is how an existing login account is reached.
+user_revoke() {
+  user_name= user_base= user_dry=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) user_base=${2-}; shift 2 ;;
+      --dry-run) user_dry=1; shift ;;
+      -h|--help) user_usage; exit 0 ;;
+      -*) printf 'dsh-cli: user revoke: unknown option: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [ -n "$user_name" ]; then
+          printf 'dsh-cli: user revoke: one name at a time\n' >&2
+          exit 2
+        fi
+        user_name=$1; shift ;;
+    esac
+  done
+
+  if [ -z "$user_name" ]; then
+    printf 'dsh-cli: user revoke needs a name\n' >&2
+    user_usage >&2
+    exit 2
+  fi
+  if [ -z "$user_base" ]; then
+    user_base=$(user_base_default)
+  fi
+  user_base=${user_base%/}
+
+  user_entry=$(getent passwd "$user_name" || true)
+  if [ -z "$user_entry" ]; then
+    printf 'dsh-cli: no account named %s\n' "$user_name" >&2
+    exit 1
+  fi
+  # The home comes from the passwd entry, so a --base mismatch cannot point the
+  # cleanup at another directory.
+  user_home=$(printf '%s\n' "$user_entry" | cut -d: -f6)
+  user_link="$home/$user_name"
+
+  printf 'dsh-cli: user revoke %s\n' "$user_name"
+  printf 'dsh-cli: home  %s (left in place)\n' "$user_home"
+  if [ -L "$user_link" ]; then
+    user_run rm -f "$user_link"
+  fi
+  if [ -d "$user_home" ]; then
+    user_run setfacl -R -x "u:$account" "$user_home"
+    user_run setfacl -R -d -x "u:$account" "$user_home"
+  fi
+  user_run gpasswd -d "$account" "$user_name" 2>/dev/null || true
+  # Both sides of the traverse chain: the account's own entries from `add`, and any
+  # entry that let the service account through a private ancestor.
+  user_traverse "$user_home" "$account" revoke
+  user_traverse "$user_home" "$user_name" revoke
+  printf 'dsh-cli: revoked; %s keeps the account and every file\n' "$user_name"
+}
+
+user_command() {
+  user_verb=${1-}
+  if [ $# -gt 0 ]; then
+    shift
+  fi
+  case "$user_verb" in
+    add) user_require_root "user add $*"; user_add "$@" ;;
+    list) user_list "$@" ;;
+    revoke) user_require_root "user revoke $*"; user_revoke "$@" ;;
+    remove|rm) user_require_root "user remove $*"; user_remove "$@" ;;
+    help|-h|--help) user_usage ;;
+    '')
+      printf 'dsh-cli: user needs a subcommand\n' >&2
+      user_usage >&2
+      exit 2 ;;
+    *)
+      printf 'dsh-cli: unknown user subcommand: %s\n' "$user_verb" >&2
+      user_usage >&2
+      exit 2 ;;
+  esac
+}
+
+# The one subcommand this wrapper answers itself. Everything else falls through to
+# the CLI under the service account, exactly as before.
+if [ "${1-}" = user ]; then
+  shift
+  user_command "$@"
+  exit 0
+fi
 
 if [ "$(id -u)" = 0 ]; then
   exec setpriv --reuid="$account" --regid="$(id -gn "$account")" --init-groups \

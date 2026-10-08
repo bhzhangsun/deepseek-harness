@@ -80,6 +80,41 @@ case "$refused" in
 esac
 printf 'smoke-test: dsh-cli refuses an unprivileged caller\n'
 
+# `user` is the one subcommand dsh-cli answers itself: a planning subcommand, so a
+# dry run proves the wiring without creating an account on the smoke host. Its
+# refusal and read-only paths matter exactly as the account switch does.
+refused_user=$(setpriv --reuid=nobody --regid="$(id -g nobody)" --clear-groups \
+  /usr/bin/dsh-cli user add dsh-smoke 2>&1 || true)
+case "$refused_user" in
+  *'through sudo'*) ;;
+  *) fail "dsh-cli user add did not refuse an unprivileged caller: $refused_user" ;;
+esac
+printf 'smoke-test: dsh-cli user add refuses an unprivileged caller\n'
+
+listed=$(setpriv --reuid=nobody --regid="$(id -g nobody)" --clear-groups \
+  /usr/bin/dsh-cli user list 2>&1) || fail "dsh-cli user list failed without root:
+$listed"
+case "$listed" in
+  ACCOUNT*) ;;
+  *) fail "dsh-cli user list printed no header: $listed" ;;
+esac
+printf 'smoke-test: dsh-cli user list reads without root\n'
+
+plan=$(/usr/bin/dsh-cli user add dsh-smoke --dry-run 2>&1) || fail "dsh-cli user add --dry-run failed:
+$plan"
+case "$plan" in
+  *'--home '*|*'--home-dir '*) ;;
+  *) fail "dsh-cli user add planned no home: $plan" ;;
+esac
+case "$plan" in
+  *'setfacl'*) ;;
+  *) fail "dsh-cli user add planned no ACL grant: $plan" ;;
+esac
+if getent passwd dsh-smoke >/dev/null 2>&1; then
+  fail 'dsh-cli user add --dry-run created the account'
+fi
+printf 'smoke-test: dsh-cli user add --dry-run plans without creating anything\n'
+
 # The plugin command forwards to pnpm through PATH, which the package does not
 # carry, so the documented prerequisite has to be enough on its own.
 printf 'smoke-test: checking the pnpm prerequisite\n'
