@@ -79,10 +79,10 @@ A private HTTPS endpoint (Tailscale Serve) or a public one (a `cloudflared` tunn
 
 A tunnel or proxy authenticates nobody: the launch token is a process credential, and anyone who reads it can run commands. The third-party [`@xgone/dsh-remote`](https://github.com/xgone/dsh-remote) plugin (MIT) puts a login gate with TOTP in front of every path, and rewrites an authenticated request's `Host` to the loopback authority so the request fence admits its `/api` and WebSocket calls. That removes the need for `--trusted-host` and for proxy configuration of your own; a tunnel to the loopback port is still required, because the service binds `127.0.0.1`.
 
-The package carries the pinned Node runtime and the published application closure. `dsh plugin` forwards its arguments to `pnpm`, which it resolves through `PATH` and which the package does not carry, so install pnpm once with the bundled npm before managing plugins. npm's global shim for pnpm carries an `env node` shebang while the service account's `PATH` has no node, so name the bundled runtime for the call:
+The package carries the pinned Node runtime and the published application closure. `dsh plugin` forwards its arguments to `pnpm`, which it resolves through `PATH` and which the package does not carry, so install pnpm once with the bundled npm before managing plugins. Name the install directory: npm's global prefix is not necessarily the runtime's own directory, and the shim below is the one inside the runtime's `bin`. That shim carries an `env node` shebang while the service account's `PATH` has no node, so put the bundled runtime in front of the call:
 
 ```sh
-sudo /opt/dsh/node/bin/npm install -g pnpm@11.7.0   # the version package.json pins
+sudo /opt/dsh/node/bin/npm install -g --prefix /opt/dsh/node pnpm@11.7.0   # the version package.json pins
 sudo tee /usr/local/bin/pnpm >/dev/null <<'EOF'
 #!/bin/sh
 exec env PATH="/opt/dsh/node/bin:$PATH" /opt/dsh/node/bin/pnpm "$@"

@@ -83,7 +83,9 @@ printf 'smoke-test: dsh-cli refuses an unprivileged caller\n'
 # The plugin command forwards to pnpm through PATH, which the package does not
 # carry, so the documented prerequisite has to be enough on its own.
 printf 'smoke-test: checking the pnpm prerequisite\n'
-/opt/dsh/node/bin/npm install -g pnpm@11.7.0 >/dev/null
+printf 'smoke-test: npm global prefix %s\n' "$(/opt/dsh/node/bin/npm prefix -g)"
+/opt/dsh/node/bin/npm install -g --prefix /opt/dsh/node pnpm@11.7.0 | tail -2
+ls -l /opt/dsh/node/bin/pnpm || true
 cat > /usr/local/bin/pnpm <<'EOF'
 #!/bin/sh
 exec env PATH="/opt/dsh/node/bin:$PATH" /opt/dsh/node/bin/pnpm "$@"
