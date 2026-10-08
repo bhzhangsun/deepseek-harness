@@ -95,6 +95,14 @@ sudo systemctl restart dsh
 
 `/usr/bin/dsh` run from your own shell would use `$HOME/.dsh` instead, a tree the service never reads, and installing as root leaves `$DSH_HOME/auth/store.json` owned by root, so the service account cannot create the first account. A plugin change takes effect on the next restart; the running service does not have to be stopped first.
 
+`dsh-service` switches accounts with `sudo`, so it asks for your own password, once per terminal within sudo's timestamp window. An unattended install needs a rule, and the rule names `env` because that is the command sudo runs: granting it grants every command as the service account, which is what the password would authorize anyway, one prompt at a time.
+
+```sh
+printf '%s ALL=(dsh) NOPASSWD: /usr/bin/env\n' "$USER" | sudo tee /etc/sudoers.d/dsh-service
+sudo chmod 0440 /etc/sudoers.d/dsh-service
+sudo visudo -c
+```
+
 The first administrator can be created only from loopback: reach the port over `ssh -L` and create the account in the browser, or set `bootstrap` in `/var/lib/dsh/profiles/web/cordis.patch.yml` for a host without a browser, then remove the plaintext password after the first login. Set `session.secure: true` once the tunnel serves HTTPS. The plugin is third-party and tracks DSH releases, so check its changelog before upgrading the package.
 
 The unit sets `DSH_HOME=/var/lib/dsh` and `HOME=/var/lib/dsh`, denies new privileges, gives the service a private `/tmp`, and mounts the system read-only. `ProtectHome=read-only` blocks `/home`, so a harness that must edit files there needs that directive relaxed. Relocating `DSH_HOME` in `/etc/default/dsh` also requires adding the new path to `ReadWritePaths`.
