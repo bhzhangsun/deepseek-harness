@@ -80,6 +80,20 @@ case "$refused" in
 esac
 printf 'smoke-test: dsh-cli refuses an unprivileged caller\n'
 
+# The plugin command forwards to pnpm through PATH, which the package does not
+# carry, so the documented prerequisite has to be enough on its own.
+printf 'smoke-test: checking the pnpm prerequisite\n'
+/opt/dsh/node/bin/npm install -g pnpm@11.7.0 >/dev/null
+cat > /usr/local/bin/pnpm <<'EOF'
+#!/bin/sh
+exec env PATH="/opt/dsh/node/bin:$PATH" /opt/dsh/node/bin/pnpm "$@"
+EOF
+chmod 0755 /usr/local/bin/pnpm
+plugin_list=$(/usr/bin/dsh-cli plugin --profile web list 2>&1) \
+  || fail "dsh-cli plugin list failed after the documented pnpm install:
+$plugin_list"
+printf 'smoke-test: dsh-cli plugin list works after the pnpm prerequisite\n'
+
 # `?` is a pattern wildcard inside ${...}, so strip the query with an escaped
 # one; a bare /?* removes from the first slash and leaves "http:".
 base=${url%%\?*}
