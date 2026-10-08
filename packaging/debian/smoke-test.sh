@@ -55,6 +55,12 @@ done
 $(journalctl -u dsh --no-pager --lines=40 || true)"
 printf 'smoke-test: launch URL %s\n' "$url"
 
+# The unit declares DSH_WEB_ARGS empty, because systemd reports every unset
+# variable the ExecStart line references on each start.
+if journalctl -u dsh --no-pager 2>/dev/null | grep -q 'Referenced but unset environment variable'; then
+  fail 'the unit references an unset environment variable'
+fi
+
 # `?` is a pattern wildcard inside ${...}, so strip the query with an escaped
 # one; a bare /?* removes from the first slash and leaves "http:".
 base=${url%%\?*}

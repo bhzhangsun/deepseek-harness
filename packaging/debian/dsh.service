@@ -17,6 +17,9 @@ Environment=HOME=/var/lib/dsh
 Environment=DSH_HOME=/var/lib/dsh
 Environment=DSH_TELEMETRY_DISABLED=1
 Environment=DSH_WEB_PORT=3080
+# Declared empty so the ExecStart expansion finds it set; the environment file
+# below overrides it when an operator names a tunnel or proxy authority.
+Environment=DSH_WEB_ARGS=
 EnvironmentFile=-/etc/default/dsh
 
 # `web` serves the Web UI and prints the token URL it is reachable at. The unit
