@@ -61,6 +61,15 @@ if journalctl -u dsh --no-pager 2>/dev/null | grep -q 'Referenced but unset envi
   fail 'the unit references an unset environment variable'
 fi
 
+# dsh-service resolves the service account and state directory from the unit, so
+# plugin and profile commands change what the service loads. It reports the
+# packaged release with no environment supplied by the caller.
+installed=$(dpkg-query -W -f='${Version}' dsh)
+expected=$(printf '%s' "$installed" | sed 's/~/-/')
+reported=$(/usr/bin/dsh-service --version 2>/dev/null || true)
+[ "$reported" = "$expected" ] || fail "dsh-service reported '$reported', expected '$expected'"
+printf 'smoke-test: dsh-service reports %s\n' "$reported"
+
 # `?` is a pattern wildcard inside ${...}, so strip the query with an escaped
 # one; a bare /?* removes from the first slash and leaves "http:".
 base=${url%%\?*}

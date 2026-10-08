@@ -9,6 +9,7 @@ This directory builds a Debian package that installs DeepSeek Harness as a syste
 | `/opt/dsh/node` | The Node.js runtime pinned by [`scripts/primary-runtime/lock.json`](../scripts/primary-runtime/lock.json) |
 | `/opt/dsh/app` | `@deepseek-ai/dsh@<version>` and its dependency closure, installed from the npm registry |
 | `/usr/bin/dsh` | Launcher that runs the bundled runtime against the installed entry point |
+| `/usr/bin/dsh-service` | Runs that launcher as the service account and against the service state, for plugin and profile commands |
 | `/lib/systemd/system/dsh.service` | The service unit |
 | `/etc/default/dsh` | Configuration file the unit reads (a `conffile`, so an upgrade keeps your edits) |
 | `/var/lib/dsh` | State: sessions, settings, and the browser credential file, owned by the `dsh` service account |
@@ -85,16 +86,14 @@ sudo /opt/dsh/node/bin/npm install -g pnpm@11.7.0   # the version package.json p
 sudo ln -sf /opt/dsh/node/bin/pnpm /usr/local/bin/pnpm
 ```
 
-Then, as the service account, with the service stopped so the profile is not rewritten while it boots:
+Then install the plugin through `dsh-service`, which reads the account and state directory off the unit and runs the CLI there:
 
 ```sh
-sudo systemctl stop dsh
-sudo -u dsh env HOME=/var/lib/dsh DSH_HOME=/var/lib/dsh PATH=/usr/local/bin:/usr/bin:/bin \
-  /usr/bin/dsh plugin --profile web add @xgone/dsh-remote
-sudo systemctl start dsh
+dsh-service plugin --profile web add @xgone/dsh-remote
+sudo systemctl restart dsh
 ```
 
-Installing as root instead leaves `$DSH_HOME/auth/store.json` owned by root, and the service account then cannot create the first account.
+`/usr/bin/dsh` run from your own shell would use `$HOME/.dsh` instead, a tree the service never reads, and installing as root leaves `$DSH_HOME/auth/store.json` owned by root, so the service account cannot create the first account. A plugin change takes effect on the next restart; the running service does not have to be stopped first.
 
 The first administrator can be created only from loopback: reach the port over `ssh -L` and create the account in the browser, or set `bootstrap` in `/var/lib/dsh/profiles/web/cordis.patch.yml` for a host without a browser, then remove the plaintext password after the first login. Set `session.secure: true` once the tunnel serves HTTPS. The plugin is third-party and tracks DSH releases, so check its changelog before upgrading the package.
 

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Run the dsh CLI as the account and against the state directory of the systemd
+# unit, so plugin and profile commands change what the service loads. Running
+# /usr/bin/dsh directly uses the caller's $HOME/.dsh instead, a tree the service
+# never reads. Switching to the service account requires its owner's permission,
+# which for the packaged account means sudo.
+set -e
+
+unit=dsh.service
+
+# The unit owns both facts, so read them there and honor a drop-in override.
+account=$(systemctl show -p User --value "$unit" 2>/dev/null || true)
+[ -n "$account" ] || account=dsh
+
+home=$(getent passwd "$account" | cut -d: -f6)
+if [ -z "$home" ]; then
+  printf 'dsh-service: no passwd entry for %s\n' "$account" >&2
+  exit 1
+fi
+
+state=$(systemctl show -p Environment --value "$unit" 2>/dev/null |
+  tr ' ' '\n' | sed -n 's/^DSH_HOME=//p' | tail -n 1)
+if [ -z "$state" ] && [ -r /etc/default/dsh ]; then
+  state=$(sed -n 's/^[[:space:]]*DSH_HOME=//p' /etc/default/dsh | tail -n 1)
+fi
+state=${state%\"}; state=${state#\"}
+state=${state%\'}; state=${state#\'}
+[ -n "$state" ] || state=$home
+
+# PATH decides which pnpm an install uses, and the service account has no login
+# environment of its own, so name the search path explicitly.
+exec sudo -u "$account" env HOME="$home" DSH_HOME="$state" \
+  PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/dsh "$@"
