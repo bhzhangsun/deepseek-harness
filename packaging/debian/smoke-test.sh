@@ -61,14 +61,24 @@ if journalctl -u dsh --no-pager 2>/dev/null | grep -q 'Referenced but unset envi
   fail 'the unit references an unset environment variable'
 fi
 
-# dsh-service resolves the service account and state directory from the unit, so
-# plugin and profile commands change what the service loads. It reports the
-# packaged release with no environment supplied by the caller.
+# dsh-cli resolves the service account and state directory from the unit, so
+# plugin and profile commands change what the service loads. Root is the caller
+# it switches for, and it reports the packaged release.
 installed=$(dpkg-query -W -f='${Version}' dsh)
 expected=$(printf '%s' "$installed" | sed 's/~/-/')
-reported=$(/usr/bin/dsh-service --version 2>/dev/null || true)
-[ "$reported" = "$expected" ] || fail "dsh-service reported '$reported', expected '$expected'"
-printf 'smoke-test: dsh-service reports %s\n' "$reported"
+reported=$(/usr/bin/dsh-cli --version 2>/dev/null || true)
+[ "$reported" = "$expected" ] || fail "dsh-cli reported '$reported', expected '$expected'"
+printf 'smoke-test: dsh-cli reports %s\n' "$reported"
+
+# A caller that is neither root nor the service account is refused instead of
+# silently writing a state tree the service never reads.
+refused=$(setpriv --reuid=nobody --regid="$(id -g nobody)" --clear-groups \
+  /usr/bin/dsh-cli --version 2>&1 || true)
+case "$refused" in
+  *'through sudo'*) ;;
+  *) fail "dsh-cli did not refuse an unprivileged caller: $refused" ;;
+esac
+printf 'smoke-test: dsh-cli refuses an unprivileged caller\n'
 
 # `?` is a pattern wildcard inside ${...}, so strip the query with an escaped
 # one; a bare /?* removes from the first slash and leaves "http:".

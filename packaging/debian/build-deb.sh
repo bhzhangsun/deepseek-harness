@@ -116,7 +116,7 @@ fi
 install -d "$staging/DEBIAN" "$staging/usr/bin" "$staging/lib/systemd/system" \
   "$staging/etc/default" "$staging/usr/share/doc/dsh"
 install -m 0755 "$script_dir/dsh.launcher" "$staging/usr/bin/dsh"
-install -m 0755 "$script_dir/dsh-service" "$staging/usr/bin/dsh-service"
+install -m 0755 "$script_dir/dsh-cli" "$staging/usr/bin/dsh-cli"
 install -m 0644 "$script_dir/dsh.service" "$staging/lib/systemd/system/dsh.service"
 install -m 0644 "$script_dir/dsh.default" "$staging/etc/default/dsh"
 install -m 0644 "$repo_root/LICENSE" "$staging/usr/share/doc/dsh/copyright"
@@ -152,8 +152,8 @@ Description: DeepSeek Harness agent harness, served as a systemd service
  @deepseek-ai/dsh application beneath /opt/dsh, and runs the Web UI as the
  dsh.service systemd unit. The unit binds 127.0.0.1 only and requires the
  token URL the service prints to its journal for the first browser login.
- The dsh-service command runs the CLI as that unit's account and against its
- state directory, which is what plugin and profile commands must change.
+ The dsh-cli command runs the CLI, through sudo, as that unit's account and
+ against its state directory, which is what plugin and profile commands change.
 EOF
 
 ( cd "$staging" && find . -type f ! -path './DEBIAN/*' -print0 \

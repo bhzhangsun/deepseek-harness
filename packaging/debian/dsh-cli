@@ -2,8 +2,7 @@
 # Run the dsh CLI as the account and against the state directory of the systemd
 # unit, so plugin and profile commands change what the service loads. Running
 # /usr/bin/dsh directly uses the caller's $HOME/.dsh instead, a tree the service
-# never reads. Switching to the service account requires its owner's permission,
-# which for the packaged account means sudo.
+# never reads. The account switch needs root, so invoke this with sudo.
 set -e
 
 unit=dsh.service
@@ -14,7 +13,7 @@ account=$(systemctl show -p User --value "$unit" 2>/dev/null || true)
 
 home=$(getent passwd "$account" | cut -d: -f6)
 if [ -z "$home" ]; then
-  printf 'dsh-service: no passwd entry for %s\n' "$account" >&2
+  printf 'dsh-cli: no passwd entry for %s\n' "$account" >&2
   exit 1
 fi
 
@@ -29,5 +28,17 @@ state=${state%\'}; state=${state#\'}
 
 # PATH decides which pnpm an install uses, and the service account has no login
 # environment of its own, so name the search path explicitly.
-exec sudo -u "$account" env HOME="$home" DSH_HOME="$state" \
-  PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/dsh "$@"
+entry=/usr/bin/dsh
+search=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ "$(id -u)" = 0 ]; then
+  exec setpriv --reuid="$account" --regid="$(id -gn "$account")" --init-groups \
+    env HOME="$home" DSH_HOME="$state" PATH="$search" "$entry" "$@"
+fi
+
+if [ "$(id -un)" != "$account" ]; then
+  printf 'dsh-cli: run this through sudo, as in: sudo dsh-cli %s\n' "$*" >&2
+  exit 1
+fi
+
+exec env HOME="$home" DSH_HOME="$state" PATH="$search" "$entry" "$@"

@@ -9,7 +9,7 @@ This directory builds a Debian package that installs DeepSeek Harness as a syste
 | `/opt/dsh/node` | The Node.js runtime pinned by [`scripts/primary-runtime/lock.json`](../scripts/primary-runtime/lock.json) |
 | `/opt/dsh/app` | `@deepseek-ai/dsh@<version>` and its dependency closure, installed from the npm registry |
 | `/usr/bin/dsh` | Launcher that runs the bundled runtime against the installed entry point |
-| `/usr/bin/dsh-service` | Runs that launcher as the service account and against the service state, for plugin and profile commands |
+| `/usr/bin/dsh-cli` | Runs that launcher, under `sudo`, as the service account and against the service state, for plugin and profile commands |
 | `/lib/systemd/system/dsh.service` | The service unit |
 | `/etc/default/dsh` | Configuration file the unit reads (a `conffile`, so an upgrade keeps your edits) |
 | `/var/lib/dsh` | State: sessions, settings, and the browser credential file, owned by the `dsh` service account |
@@ -86,21 +86,24 @@ sudo /opt/dsh/node/bin/npm install -g pnpm@11.7.0   # the version package.json p
 sudo ln -sf /opt/dsh/node/bin/pnpm /usr/local/bin/pnpm
 ```
 
-Then install the plugin through `dsh-service`, which reads the account and state directory off the unit and runs the CLI there:
+Then install the plugin through `dsh-cli`, which reads the account and state directory off the unit and runs the CLI there. It switches accounts, so it needs root: run it under `sudo`, and it refuses any other unprivileged caller rather than writing a state tree the service never reads.
 
 ```sh
-dsh-service plugin --profile web add @xgone/dsh-remote
+sudo dsh-cli plugin --profile web add @xgone/dsh-remote
 sudo systemctl restart dsh
 ```
 
-`/usr/bin/dsh` run from your own shell would use `$HOME/.dsh` instead, a tree the service never reads, and installing as root leaves `$DSH_HOME/auth/store.json` owned by root, so the service account cannot create the first account. A plugin change takes effect on the next restart; the running service does not have to be stopped first.
+`/usr/bin/dsh` run from your own shell would use `$HOME/.dsh` instead, and installing as root leaves `$DSH_HOME/auth/store.json` owned by root, so the service account cannot create the first account. A plugin change takes effect on the next restart; the running service does not have to be stopped first.
 
-`dsh-service` switches accounts with `sudo`, so it asks for your own password, once per terminal within sudo's timestamp window. An unattended install needs a rule, and the rule names `env` because that is the command sudo runs: granting it grants every command as the service account, which is what the password would authorize anyway, one prompt at a time.
+`sudo` asks for your own password, once per terminal within its timestamp window. An unattended install needs one rule, naming this command and nothing else:
 
 ```sh
-printf '%s ALL=(dsh) NOPASSWD: /usr/bin/env\n' "$USER" | sudo tee /etc/sudoers.d/dsh-service
-sudo chmod 0440 /etc/sudoers.d/dsh-service
+printf '%s ALL=(ALL) NOPASSWD: /usr/bin/dsh-cli\n' "$USER" | sudo tee /etc/sudoers.d/dsh-cli
+sudo chmod 0440 /etc/sudoers.d/dsh-cli
 sudo visudo -c
+
+sudo -K                                    # drop the cached timestamp
+sudo -n dsh-cli plugin --profile web list  # proves the exemption covers the arguments an install passes
 ```
 
 The first administrator can be created only from loopback: reach the port over `ssh -L` and create the account in the browser, or set `bootstrap` in `/var/lib/dsh/profiles/web/cordis.patch.yml` for a host without a browser, then remove the plaintext password after the first login. Set `session.secure: true` once the tunnel serves HTTPS. The plugin is third-party and tracks DSH releases, so check its changelog before upgrading the package.
