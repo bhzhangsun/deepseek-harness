@@ -13,24 +13,36 @@ package=${1:?usage: smoke-test.sh <path to .deb>}
 [ "$(id -u)" = 0 ] || { printf 'smoke-test: run as root\n' >&2; exit 2; }
 [ -d /run/systemd/system ] || { printf 'smoke-test: systemd is not running\n' >&2; exit 2; }
 
+# apt-get reads an argument without a leading slash as a package name and
+# reports "Unable to locate package", so resolve the path before installing.
+case "$package" in
+  /*) ;;
+  *) package=$(cd "$(dirname "$package")" && pwd)/$(basename "$package") ;;
+esac
+
 fail() { printf 'smoke-test: %s\n' "$1" >&2; exit 1; }
 
 printf 'smoke-test: installing %s\n' "$package"
 apt-get install -y "$package"
 
-printf 'smoke-test: waiting for dsh.service\n'
+# The unit is Type=simple, so it reports active as soon as the process starts,
+# while the Web UI needs longer to print the one-time token URL the browser
+# exchanges for its cookie. Wait for that URL: it is the readiness signal and
+# the only address the loopback Host check accepts.
+printf 'smoke-test: waiting for the launch URL\n'
+url=
 for _ in $(seq 1 90); do
-  systemctl is-active --quiet dsh && break
+  if ! systemctl is-active --quiet dsh; then
+    systemctl status dsh --no-pager --lines=40 || true
+    fail 'dsh.service is not active'
+  fi
+  url=$(journalctl -u dsh --no-pager 2>/dev/null \
+    | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+' | tail -1 || true)
+  if [ -n "$url" ]; then
+    break
+  fi
   sleep 1
 done
-systemctl is-active --quiet dsh \
-  || fail "dsh.service is not active:
-$(systemctl status dsh --no-pager --lines=40 || true)"
-
-# The service prints the one-time token URL that the browser exchanges for its
-# cookie; that URL is the only address the loopback Host check accepts.
-url=$(journalctl -u dsh --no-pager 2>/dev/null \
-  | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?token=[A-Za-z0-9_-]+' | tail -1 || true)
 [ -n "$url" ] || fail "the service printed no launch URL:
 $(journalctl -u dsh --no-pager --lines=40 || true)"
 printf 'smoke-test: launch URL %s\n' "$url"
