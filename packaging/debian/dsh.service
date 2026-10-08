@@ -19,9 +19,12 @@ Environment=DSH_TELEMETRY_DISABLED=1
 Environment=DSH_WEB_PORT=3080
 EnvironmentFile=-/etc/default/dsh
 
-# `web` serves the Web UI and prints the token URL it is reachable at. It binds
-# 127.0.0.1 only: reach a remote host through `ssh -L 3080:127.0.0.1:3080`.
-ExecStart=/usr/bin/dsh web --no-open --port ${DSH_WEB_PORT}
+# `web` serves the Web UI and prints the token URL it is reachable at. The unit
+# binds 127.0.0.1: the server carries no TLS or authentication of its own, and
+# `dsh web --host 0.0.0.0` is refused, so a tunnel or reverse proxy owns any
+# external leg. `$DSH_WEB_ARGS` splits at whitespace into zero or more
+# arguments; see /etc/default/dsh for the options that admit one.
+ExecStart=/usr/bin/dsh web --no-open --port ${DSH_WEB_PORT} $DSH_WEB_ARGS
 
 Restart=on-failure
 RestartSec=5

@@ -74,6 +74,53 @@ status=$(http_code -X POST \
   "http://127.0.0.1:${port}/api/settings/describe")
 [ "$status" = 401 ] || fail "an unauthenticated request returned $status, expected 401"
 
+# The external-access recipe: a tunnel or reverse proxy owns the external leg,
+# and the operator advertises the browser-visible authority with --public-url
+# and admits it with --trusted-host. systemd splits DSH_WEB_ARGS at whitespace,
+# so this also proves the unit passes both options through to the process.
+printf 'smoke-test: checking the tunnel and reverse proxy recipe\n'
+advertised="dsh-smoke.invalid:${port}"
+printf 'DSH_WEB_ARGS=--public-url=http://%s/ --trusted-host=%s\n' \
+  "$advertised" "$advertised" >> /etc/default/dsh
+systemctl restart dsh
+
+public_url=
+for _ in $(seq 1 90); do
+  if ! systemctl is-active --quiet dsh; then
+    systemctl status dsh --no-pager --lines=40 || true
+    fail 'dsh.service is not active with DSH_WEB_ARGS set'
+  fi
+  public_url=$(journalctl -u dsh --no-pager 2>/dev/null \
+    | grep -oE "http://${advertised}/\?token=[A-Za-z0-9_-]+" | tail -1 || true)
+  if [ -n "$public_url" ]; then
+    break
+  fi
+  sleep 1
+done
+[ -n "$public_url" ] || fail "the service advertises no ${advertised} URL, so DSH_WEB_ARGS did not reach dsh web:
+$(journalctl -u dsh --no-pager --lines=40 || true)"
+
+# A proxy reaches the loopback port and preserves the browser-facing Host, so
+# connect to 127.0.0.1 while naming the advertised authority in Host; that
+# header is what the fence compares.
+token=${public_url#*token=}
+loopback="http://127.0.0.1:${port}/?token=${token}"
+status=$(http_code -H "Host: $advertised" "$loopback")
+[ "$status" = 303 ] || fail "the token exchange at ${advertised} returned $status, expected 303"
+cookie=$(curl -sS -D - -o /dev/null -H "Host: $advertised" "$loopback" \
+  | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | tail -1)
+[ -n "$cookie" ] || fail "the token exchange set no cookie for ${advertised}"
+status=$(http_code -H "Cookie: $cookie" -H "Host: $advertised" "http://127.0.0.1:${port}/")
+[ "$status" = 200 ] || fail "the authenticated page at ${advertised} returned $status, expected 200"
+
+# The fence admits loopback and every --trusted-host authority; an authority
+# that is neither is refused even with a valid cookie.
+status=$(http_code -X POST -H "Cookie: $cookie" -H 'Host: untrusted.invalid' \
+  -H 'content-type: application/json' \
+  --data '{"type":"client-request","rpcId":"smoke","method":"settings/describe","payload":{"args":{}}}' \
+  "http://127.0.0.1:${port}/api/settings/describe")
+[ "$status" = 403 ] || fail "an untrusted authority returned $status, expected 403"
+
 printf 'smoke-test: purging the package\n'
 apt-get purge -y dsh
 [ ! -e /lib/systemd/system/dsh.service ] || fail 'the unit file survives a purge'

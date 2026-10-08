@@ -4,6 +4,19 @@
 # Loopback port the Web UI listens on.
 DSH_WEB_PORT=3080
 
+# Extra `dsh web` arguments, split at whitespace, so pass one --flag=value per
+# word. The unit binds 127.0.0.1 because the Web UI runs commands and serves no
+# TLS or authentication of its own; `dsh web --host 0.0.0.0` is refused. To
+# reach the UI from another device, let a tunnel or reverse proxy forward to the
+# loopback port while preserving the browser's Host, then advertise the address
+# browsers use with --public-url and admit that authority with --trusted-host.
+# --public-url only advertises; --trusted-host is what the request fence
+# accepts, and any other authority gets 403 on every API call. An entry without
+# a port matches any port, which suits a tunnel that binds a different one each
+# time. Terminate TLS on that external leg: an http:// root sends the launch
+# token and the session cookie unencrypted.
+#DSH_WEB_ARGS=--public-url=https://nas.example.ts.net/ --trusted-host=nas.example.ts.net
+
 # State directory holding sessions, settings, and the browser credential file.
 # The service runs with ProtectSystem=full, so a directory outside /var/lib/dsh
 # also needs adding to ReadWritePaths in /lib/systemd/system/dsh.service.

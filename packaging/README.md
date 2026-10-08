@@ -37,7 +37,7 @@ On any systemd host, as root:
 packaging/debian/smoke-test.sh dist-deb/dsh_0.2.1~alpha.1_amd64.deb
 ```
 
-The script installs the package, waits for `dsh.service`, extracts the launch URL from the journal, and checks the four responses the service is expected to give: `303` for the token exchange, a `Set-Cookie` on that exchange, `200` for the authenticated page, and `401` for an unauthenticated request. It then purges the package and checks that the unit file and `/var/lib/dsh` are gone. The script deletes `/var/lib/dsh`, so run it on a throwaway host.
+The script installs the package, waits for `dsh.service`, extracts the launch URL from the journal, and checks the four responses the service is expected to give: `303` for the token exchange, a `Set-Cookie` on that exchange, `200` for the authenticated page, and `401` for an unauthenticated request. It then sets `DSH_WEB_ARGS` to a stand-in public URL, restarts the service, and repeats the exchange under that advertised authority, which must answer `200` while an untrusted authority answers `403`. Finally it purges the package and checks that the unit file and `/var/lib/dsh` are gone. The script deletes `/var/lib/dsh`, so run it on a throwaway host.
 
 ## Operate
 
@@ -46,13 +46,33 @@ systemctl status dsh                                  # is the service running
 journalctl -u dsh | grep -o 'http://127\.0\.0\.1:[0-9]*/?token=[^ ]*' | tail -1
 ```
 
-Open that URL once to exchange the token for the browser cookie; the credential persists in `/var/lib/dsh/.credentials.yaml` (mode `0600`), so later restarts do not need a new token. The service binds `127.0.0.1` only. Reach a remote host through an SSH tunnel rather than by exposing the port:
+Open that URL once to exchange the token for the browser cookie; the credential persists in `/var/lib/dsh/.credentials.yaml` (mode `0600`), so later restarts do not need a new token.
+
+## Reach the Web UI from another device
+
+The unit binds `127.0.0.1`, and `dsh web --host 0.0.0.0` is refused:
+
+```
+error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead
+```
+
+The Web UI runs commands and serves no TLS, authentication, or origin policy of its own, so an external leg belongs to a tunnel or reverse proxy. The one that exposes nothing needs no configuration:
 
 ```sh
 ssh -L 3080:127.0.0.1:3080 you@host
 ```
 
 Then open `http://127.0.0.1:3080/?token=<the token from the remote journal>`.
+
+A tunnel or proxy that does publish the UI must forward to the loopback port and preserve the browser-facing `Host`. `DSH_WEB_ARGS` in `/etc/default/dsh` carries the two options such a deployment needs:
+
+```sh
+DSH_WEB_ARGS=--public-url=https://nas.example.ts.net/ --trusted-host=nas.example.ts.net
+```
+
+`--public-url` supplies the printed launch URL and `DSH_WEB_URL`; it grants no trust. `--trusted-host` is what the request fence accepts, and a browser reaching the deployment under any other authority gets `403` on every API call however correct the tunnel or proxy is. A port-less entry matches any port, which suits a tunnel that binds a different one each time. The launch token and the signed session cookie still authenticate the request. systemd splits `DSH_WEB_ARGS` at whitespace, so pass one `--flag=value` per word.
+
+A private HTTPS endpoint (Tailscale Serve) or a public one (a `cloudflared` tunnel) provides that external leg without proxy configuration of your own. Terminate TLS there: an `http://` root sends the launch token and the session cookie unencrypted, and the printed URL carries a process credential, so share it only with intended users.
 
 The unit sets `DSH_HOME=/var/lib/dsh` and `HOME=/var/lib/dsh`, denies new privileges, gives the service a private `/tmp`, and mounts the system read-only. `ProtectHome=read-only` blocks `/home`, so a harness that must edit files there needs that directive relaxed. Relocating `DSH_HOME` in `/etc/default/dsh` also requires adding the new path to `ReadWritePaths`.
 
