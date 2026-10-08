@@ -162,6 +162,30 @@ status=$(http_code -X POST -H "Cookie: $cookie" -H 'Host: untrusted.invalid' \
   "http://127.0.0.1:${port}/api/settings/describe")
 [ "$status" = 403 ] || fail "an untrusted authority returned $status, expected 403"
 
+# The remote-access plugin is what makes an external browser reachable without a
+# reverse proxy, so the packaged service has to install it and then load it under
+# its own hardening: the login gate it serves replaces the application UI.
+printf 'smoke-test: installing the remote-access plugin\n'
+plugin_add=$(/usr/bin/dsh-cli plugin --profile web add @xgone/dsh-remote@0.3.5 2>&1) \
+  || fail "dsh-cli plugin add failed:
+$plugin_add"
+grep -q '@xgone/dsh-remote' /var/lib/dsh/profiles/web/package.json \
+  || fail 'the profile manifest does not list the installed plugin'
+systemctl restart dsh
+
+login=
+for _ in $(seq 1 90); do
+  login=$(curl -sSL -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/" 2>/dev/null || true)
+  case "$login" in *[Tt][Oo][Tt][Pp]*|*[Pp]assword*) break;; esac
+  sleep 1
+done
+case "$login" in
+  *[Tt][Oo][Tt][Pp]*|*[Pp]assword*) ;;
+  *) fail "the service serves no login gate after installing the remote plugin:
+$(curl -sS -H "Host: 127.0.0.1:${port}" "http://127.0.0.1:${port}/" | head -5)" ;;
+esac
+printf 'smoke-test: the remote plugin serves its login gate\n'
+
 printf 'smoke-test: purging the package\n'
 apt-get purge -y dsh
 [ ! -e /lib/systemd/system/dsh.service ] || fail 'the unit file survives a purge'
