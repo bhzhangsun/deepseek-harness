@@ -99,6 +99,8 @@ sudo systemctl restart dsh
 
 `/usr/bin/dsh` run from your own shell would use `$HOME/.dsh` instead, and installing as root leaves `$DSH_HOME/auth/store.json` owned by root, so the service account cannot create the first account. A plugin change takes effect on the next restart; the running service does not have to be stopped first.
 
+A plugin command that reports `EACCES` never reached pnpm: it resolved an executable the service account cannot reach, either one under a home directory the account cannot traverse (Ubuntu creates `0750` homes, so another user's home is closed to it) or a shim whose `env node` shebang finds no node on that account's `PATH`. Installing pnpm into the runtime as above avoids both, and `dsh-cli` drops `XDG_CONFIG_HOME` with its siblings so pnpm's configuration, cache, and state stay under the account's own home rather than the caller's.
+
 `sudo` asks for your own password, once per terminal within its timestamp window. An unattended install needs one rule, naming this command and nothing else:
 
 ```sh
