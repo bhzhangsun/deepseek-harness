@@ -72,12 +72,16 @@ another account needs a grant. `add` supplies the three parts of one:
 
   home   <state>/users/<name>   owned by <name>, mode 0750 (2770 with group share)
   link   <home>/<name>          the entry point the agent reads as ~/<name>
-  grant  acl   (default) named ACL on the home plus a default ACL, so files the
-               account creates later stay reachable. It applies to the next open
-               and changes no process identity, so nothing needs a restart.
-         group the service account joins <name>'s private group and the home
-               gains the setgid bit. A running unit keeps the supplementary
-               groups it started with, so restart it to pick the group up:
+  grant  acl   (default) a named ACL for the service account, plus the same as a
+               default ACL so files created later inherit it. The owner of the home
+               is in that default ACL too, because a file belongs to whoever created
+               it: without that entry the agent's files would belong to the service
+               account alone and the owner could not write them. An ACL is read at
+               the next open, so nothing needs a restart.
+         group the service account joins <name>'s private group and the home gains
+               the setgid bit, which keeps files created later in that group. A
+               running unit keeps the supplementary groups it started with, so
+               restart it to pick the group up:
                sudo systemctl restart dsh
          both  both grants.     none  no grant: only the account and directory.
 
@@ -126,6 +130,27 @@ user_run() {
   else
     "$@"
   fi
+}
+
+# setfacl refuses an entry on a file another account owns, and one such file must
+# not abandon a half-finished grant: the recursive walk is left to finish, and what
+# it could not change is reported instead of silently staying closed. The entries it
+# did set are already in place, so a second run over the same tree is harmless.
+user_run_acl() {
+  if [ "$user_dry" = 1 ]; then
+    printf '  + %s\n' "$*"
+    return 0
+  fi
+  user_acl_err=$(mktemp 2>/dev/null || printf '/tmp/dsh-cli-acl.%s' "$$")
+  "$@" 2>"$user_acl_err" || {
+    printf 'dsh-cli: %s entries were left alone, another account owns them:\n' \
+      "$(wc -l < "$user_acl_err" | tr -d ' ')" >&2
+    sed -n 's/^setfacl: \(.*\): .*$/\1/p' "$user_acl_err" | sort -u | head -5 |
+      sed 's/^/  /' >&2
+    printf 'dsh-cli: cover them as root if they matter:\n  sudo %s\n' "$*" >&2
+  }
+  rm -f "$user_acl_err"
+  return 0
 }
 
 # Walk the ancestors of a home: grant traverse on the way in, drop it on the way
@@ -304,16 +329,31 @@ user_add() {
   if [ "$user_readonly" = 1 ]; then
     user_perm=r
   fi
+  # A file belongs to whoever created it, so every file the service account writes in
+  # here afterwards belongs to the service account, and the owner of the home loses
+  # write access to it. The owner therefore needs an entry of its own, and that entry
+  # has to be in the default ACL to survive into the new files: without it the grant
+  # is one-way and the owner can only read what the agent wrote. Only the service
+  # account itself would make the second entry redundant.
+  user_owner=$(stat -c %U "$user_home" 2>/dev/null || true)
+  if [ -z "$user_owner" ]; then
+    # The home does not exist yet: a real run creates it as <name>:<name>.
+    user_owner=$user_name
+  fi
+  user_acl="u:$account:${user_perm}X"
+  if [ "$user_owner" != "$account" ]; then
+    user_acl="$user_acl,u:$user_owner:rwX"
+  fi
   if [ "$user_share" = acl ] || [ "$user_share" = both ]; then
-    user_run setfacl -R -m "u:$account:${user_perm}X" "$user_home"
-    user_run setfacl -R -d -m "u:$account:${user_perm}X" "$user_home"
+    user_run_acl setfacl -R -m "$user_acl" "$user_home"
+    user_run_acl setfacl -R -d -m "$user_acl" "$user_home"
   fi
   if [ "$user_share" = group ] || [ "$user_share" = both ]; then
     user_run usermod -aG "$user_name" "$account"
     # A default group ACL carries the write bit to files the account creates later;
     # the group bits alone would leave them readable only, because the umask that
     # creates them does not know this directory is shared.
-    user_run setfacl -R -d -m "g:$user_name:rwX" "$user_home"
+    user_run_acl setfacl -R -d -m "g:$user_name:rwX" "$user_home"
   fi
 
   # The check runs as the account itself, so a grant that quietly failed cannot
@@ -351,6 +391,10 @@ user_add() {
   esac
   if [ "$user_share" = acl ] || [ "$user_share" = both ]; then
     printf 'dsh-cli: an ACL is read at the next open, so no restart needed\n'
+    if [ "$user_owner" != "$account" ]; then
+      printf 'dsh-cli: %s keeps write access to the files %s creates here\n' \
+        "$user_owner" "$account"
+    fi
   fi
   if [ "$user_share" = group ] || [ "$user_share" = both ]; then
     printf 'dsh-cli: a running unit keeps its old groups, so apply the membership:\n'
@@ -542,9 +586,16 @@ user_revoke() {
   if [ -L "$user_link" ]; then
     user_run rm -f "$user_link"
   fi
+  # Both entries the grant added come back out: the service account's, and the one
+  # that kept the home's owner able to write the service account's files.
+  user_owner=$(stat -c %U "$user_home" 2>/dev/null || true)
+  user_spec="u:$account"
+  if [ -n "$user_owner" ] && [ "$user_owner" != "$account" ]; then
+    user_spec="$user_spec,u:$user_owner"
+  fi
   if [ -d "$user_home" ]; then
-    user_run setfacl -R -x "u:$account" "$user_home"
-    user_run setfacl -R -d -x "u:$account" "$user_home"
+    user_run_acl setfacl -R -x "$user_spec" "$user_home"
+    user_run_acl setfacl -R -d -x "$user_spec" "$user_home"
   fi
   user_run gpasswd -d "$account" "$user_name" 2>/dev/null || true
   # Both sides of the traverse chain: the account's own entries from `add`, and any

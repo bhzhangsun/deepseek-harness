@@ -65,8 +65,14 @@ cat > "$bin/stat" <<EOF
 #!/bin/sh
 # stat -c %a <path> decides which ancestors need a traverse ACL: report the
 # private state root as 0700 and every other directory as world-traversable.
+# stat -c %U <path> names the owner, which the grant needs for the entry that keeps
+# the owner able to write the service account's files: a home created here belongs
+# to the account it is named after.
 for last in "\$@"; do :; done
-if [ "\$last" = "$state" ]; then echo 700; else echo 755; fi
+case "\$*" in
+  *"%a"*) if [ "\$last" = "$state" ]; then echo 700; else echo 755; fi ;;
+  *"%U"*) echo "\${last##*/}" ;;
+esac
 EOF
 
 cat > "$bin/adduser" <<EOF
@@ -146,14 +152,27 @@ for a in "\$@"; do
   prev=\$a
 done
 for last in "\$@"; do :; done
+# A file another account owns is what makes the real setfacl stop part way through a
+# tree, so a marker makes the stub refuse exactly the way the tool does. The wrapper
+# has to keep going and report it.
+if [ -f "$root/foreign" ]; then
+  case "\$last" in
+    */users/*) echo "setfacl: \$last/foreign.txt: Operation not permitted" >&2; exit 1 ;;
+  esac
+fi
 marker="$root/acl.\$(printf '%s' "\$last" | tr / _)"
 if [ "\$verb" = remove ]; then
   if [ -f "\$marker" ]; then
-    grep -v -F "\$spec" "\$marker" > "\$marker.new" 2>/dev/null || :
+    cp "\$marker" "\$marker.new"
+    for entry in \$(printf '%s' "\$spec" | tr ',' ' '); do
+      grep -v -F "\$entry" "\$marker.new" > "\$marker.tmp" 2>/dev/null || :
+      mv "\$marker.tmp" "\$marker.new"
+    done
     mv "\$marker.new" "\$marker"
   fi
-else
-  [ -n "\$spec" ] && echo "\$spec" >> "\$marker"
+elif [ -n "\$spec" ]; then
+  # One entry per line, the way setfacl writes them, so a removal can drop one.
+  printf '%s\n' "\$spec" | tr ',' '\n' >> "\$marker"
 fi
 exit 0
 EOF
@@ -274,8 +293,8 @@ has 'plans the base owner' "chown root:root $state/users"
 has 'plans the home mode' "chmod 0750 $state/users/alice"
 has 'plans the link under the service home' "ln -sfn $state/users/alice $dshhome/alice"
 has 'plans traverse for the new account' "setfacl -m u:alice:x $state"
-has 'plans the named grant' "setfacl -R -m u:dsh:rwX $state/users/alice"
-has 'plans the inherited default' "setfacl -R -d -m u:dsh:rwX $state/users/alice"
+has 'plans the named grant' "setfacl -R -m u:dsh:rwX,u:alice:rwX $state/users/alice"
+has 'plans the inherited default' "setfacl -R -d -m u:dsh:rwX,u:alice:rwX $state/users/alice"
 has 'plans no restart for acl' 'no restart needed'
 hasnt 'plans no group change' 'usermod'
 if [ -e "$state/users" ]; then no 'dry-run left no base' "$state/users exists"; else ok 'dry-run left no base'; fi
@@ -286,8 +305,9 @@ printf '== add ==\n'
 run 'add alice' 0 -- add alice
 logged 'ran adduser' "adduser --quiet --disabled-password --gecos  --home $state/users/alice"
 logged 'set the base owner' "chown root:root $state/users"
-logged 'granted the named ACL' "setfacl -R -m u:dsh:rwX $state/users/alice"
-logged 'granted the inherited ACL' "setfacl -R -d -m u:dsh:rwX $state/users/alice"
+logged 'granted the named ACL' "setfacl -R -m u:dsh:rwX,u:alice:rwX $state/users/alice"
+logged 'granted the inherited ACL' "setfacl -R -d -m u:dsh:rwX,u:alice:rwX $state/users/alice"
+has 'says the owner keeps write access too' 'alice keeps write access to the files dsh creates here'
 has 'reports the resolved home' "home  $state/users/alice"
 has 'reports the link' "link  $dshhome/alice -> $state/users/alice"
 if [ -d "$state/users/alice" ]; then ok 'created the home'; else no 'created the home' "$state/users/alice missing"; fi
@@ -321,7 +341,7 @@ logged 'carried the group write bit' "setfacl -R -d -m g:bob:rwX $state/users/bo
 if grep -qx bob "$groups_file"; then ok 'recorded the membership'; else no 'recorded the membership' 'bob not in groups'; fi
 
 run 'read-only dry-run' 0 -- add dave --read-only --dry-run
-has 'grants read and traverse only' "setfacl -R -m u:dsh:rX $state/users/dave"
+has 'grants read and traverse only' "setfacl -R -m u:dsh:rX,u:dave:rwX $state/users/dave"
 hasnt 'grants no write' "setfacl -R -m u:dsh:rwX"
 has 'says writes stay denied' 'writes stay denied'
 
@@ -345,12 +365,12 @@ has 're-applies instead of creating' 'exists; re-applying its grant'
 has 'reports the mode it found' 'kept the existing home mode'
 notLogged 'created no account' 'adduser'
 notLogged 'changed no mode' 'chmod'
-logged 'granted the named ACL' "setfacl -R -m u:dsh:rwX $root/other/erin"
+logged 'granted the named ACL' "setfacl -R -m u:dsh:rwX,u:erin:rwX $root/other/erin"
 has 'links the existing home' "link  $dshhome/erin -> $root/other/erin"
 run 'adopt erin with group share' 0 -- add erin --base "$root/other" --share group
 has 'warns that the group bits are needed' 'needs the group bits on that home'
 run 'adopt erin read-only' 0 -- add erin --base "$root/other" --read-only
-logged 'regranted read and traverse only' "setfacl -R -m u:dsh:rX $root/other/erin"
+logged 'regranted read and traverse only' "setfacl -R -m u:dsh:rX,u:erin:rwX $root/other/erin"
 run 'adopt erin with no grant' 0 -- add erin --base "$root/other" --share none
 has 'says out loud that it granted nothing' 'no grant was made'
 mkdir -p "$root/other2/dora"
@@ -363,14 +383,22 @@ has 'names the drop-in route' 'systemctl edit dsh'
 run 'list picks up the adopted account' 0 -- list
 match 'lists erin from its link' '^erin[[:space:]]'
 
+printf '== a file another account owns does not abandon the grant ==\n'
+: > "$root/foreign"
+run 'add uma while one entry refuses' 0 -- add uma
+has 'reports what it left alone' 'entries were left alone, another account owns them'
+has 'names the path it could not change' 'foreign.txt'
+has 'finishes the grant anyway' 'uma keeps write access to the files dsh creates here'
+rm -f "$root/foreign"
+
 printf '== revoke keeps the account and the files ==\n'
 : > "$log"
 run 'revoke erin' 0 -- revoke erin
 has 'says the home stays' '(left in place)'
 has 'says the account stays' 'keeps the account and every file'
 notLogged 'deleted no account' 'deluser'
-logged 'dropped the named ACL' "setfacl -R -x u:dsh $root/other/erin"
-logged 'dropped the inherited ACL' "setfacl -R -d -x u:dsh $root/other/erin"
+logged 'dropped the named ACL' "setfacl -R -x u:dsh,u:erin $root/other/erin"
+logged 'dropped the inherited ACL' "setfacl -R -d -x u:dsh,u:erin $root/other/erin"
 logged 'dropped the group membership' "gpasswd -d dsh erin"
 if [ -d "$root/other/erin" ]; then ok 'left the files alone'; else no 'left the files alone' 'home gone'; fi
 
