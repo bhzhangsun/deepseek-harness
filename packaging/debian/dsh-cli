@@ -316,7 +316,12 @@ user_add() {
     user_mode=$(stat -c %a "$user_home")
     printf 'dsh-cli: kept the existing home mode %s\n' "$user_mode"
     if [ "$user_share" = group ] || [ "$user_share" = both ]; then
-      printf 'dsh-cli: a group grant needs the group bits on that home: chmod g+rwx %s\n' "$user_home"
+      # The default group ACL below reaches new files only if they are created in
+      # the home's group, and that is what the setgid bit decides. Without it they
+      # land in the service account's own group, and the owner loses write access to
+      # them, which is the same one-way trap the named ACL avoids with its own entry.
+      printf 'dsh-cli: files created later join this home group only if it is setgid: sudo chmod g+s %s\n' \
+        "$user_home"
     fi
   fi
   user_run ln -sfn "$user_home" "$user_link"

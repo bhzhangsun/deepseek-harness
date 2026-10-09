@@ -368,7 +368,7 @@ notLogged 'changed no mode' 'chmod'
 logged 'granted the named ACL' "setfacl -R -m u:dsh:rwX,u:erin:rwX $root/other/erin"
 has 'links the existing home' "link  $dshhome/erin -> $root/other/erin"
 run 'adopt erin with group share' 0 -- add erin --base "$root/other" --share group
-has 'warns that the group bits are needed' 'needs the group bits on that home'
+has 'warns that the setgid bit is what carries the group' 'join this home group only if it is setgid'
 run 'adopt erin read-only' 0 -- add erin --base "$root/other" --read-only
 logged 'regranted read and traverse only' "setfacl -R -m u:dsh:rX,u:erin:rwX $root/other/erin"
 run 'adopt erin with no grant' 0 -- add erin --base "$root/other" --share none
